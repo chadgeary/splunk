@@ -1,0 +1,157 @@
+---
+- name: splunk
+  hosts: localhost
+  connection: local
+  become: True
+  become_user: root
+  gather_facts: False
+  tasks:
+
+    - name: Installation RPM from S3
+      aws_s3:
+        mode: get
+        bucket: "{{ installation_bucket }}"
+        object: "{{ splunk_rpm_path }}"
+        dest: /tmp/splunk.rpm
+
+    - name: Splunk Installation
+      yum:
+        state: present
+        name: /tmp/splunk.rpm
+
+    - name: Remove Installation RPM
+      file:
+        path: /tmp/splunk.rpm
+        state: absent
+
+    - name: Port 8089/8090/8091 for Cluster
+      iptables:
+        chain: INPUT
+        ctstate: NEW
+        jump: ACCEPT
+        protocol: tcp
+        syn: match
+        destionation_port: "{{ item }}"
+        comment: Splunk Services
+      with_items:
+        - '8089'
+        - '8090'
+        - '8091'
+
+    - name: Persistent iptables (EL7)
+      shell: |
+        service iptables save
+      args:
+        warn: no
+
+    - name: Determine admin file state
+      stat:
+        path: /opt/splunk/admin
+      register: splunk_admin
+
+    - name: Generate admin file if not exists
+      shell: |
+        openssl rand -base64 32 > /opt/splunk/admin
+      become: yes
+      become_user: splunk
+      become_method: su
+      become_flags: '-s /bin/bash'
+      when: splunk_admin.stat.exists|bool == False
+
+    - name: Set admin file permissions
+      file:
+        path: /opt/splunk/admin
+        mode: '0400'
+
+    - name: Splunk Systemd State
+      shell: |
+        systemctl is-active splunkd
+      register: systemd_status
+      ignore_errors: True
+
+    - name: Register Admin Credential
+      shell: |
+        cat /opt/splunk/admin
+      register: admin_password
+      no_log: True
+
+    - name: user-seed.conf State
+      stat:
+        path: /opt/splunk/etc/system/local/user-seed.conf
+      register: user_seed
+
+    - name: user-seed.conf Template
+      template:
+        src: conf/user-seed.conf
+        dest: /opt/splunk/etc/system/local/user-seed.conf
+        owner: splunk
+        group: splunk
+        mode: '0600'
+      when: user_seed.stat.exists|bool == False
+
+    - name: Splunk EULA Acceptance Start
+      shell: |
+        /opt/splunk/bin/splunk start --accept-license &
+      become: yes
+      become_user: splunk
+      become_method: su
+      become_flags: '-s /bin/bash'
+      ignore_errors: True
+      when: systemd_status.rc != 0
+
+    - name: Splunk EULA Acceptance Wait
+      wait_for:
+        host: localhost
+        port: 8000
+        timeout: 60
+        delay: 10
+      when: systemd_status.rc != 0
+
+    - name: Splunk EULA Acceptance Stop
+      shell: |
+        /opt/splunk/bin/splunk stop
+      become: yes
+      become_user: splunk
+      become_method: su
+      become_flags: '-s /bin/bash'
+      ignore_errors: True
+      when: systemd_status.rc != 0
+
+    - name: Splunk user ownership
+      file:
+        path: /opt/splunk
+        state: directory
+        owner: splunk
+        group: splunk
+        recurse: yes
+      ignore_errors: True
+
+    - name: Splunk SystemD Unit
+      copy:
+        src: system/splunkd.service
+        dest: /etc/systemd/system/splunkd.service
+        owner: root
+        group: root
+        mode: '0400'
+
+    - name: Splunk SystemD Started/Enable
+      systemd:
+        name: splunkd
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: server.conf
+      template:
+        src: conf/indexer/server.conf
+        dest: /opt/splunk/etc/system/local/server.conf
+        owner: splunk
+        group: splunk
+        mode: '0400'
+      register: server_conf
+
+    - name: Server Reload on Change
+      system:
+        name: splunkd
+        state: restarted
+      when: server_conf.changed

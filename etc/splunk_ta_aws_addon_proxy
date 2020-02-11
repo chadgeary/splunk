@@ -1,0 +1,30 @@
+#!/bin/bash
+# Several curl / API settings to set the
+# proxy account for Splunk TA AWS addon
+
+# Ensure no environmental proxy is set
+http_proxy=""
+HTTP_PROXY=""
+https_proxy=""
+HTTPS_PROXY=""
+no_proxy="localhost"
+
+# Due to bootstrapping, we attempt multiple times
+# TODO - stop when enable is successful - otherwise we are blind
+ATTEMPTS=0
+
+while (( $ATTEMPTS <= 3 ))
+do
+
+  # increment
+  ATTEMPTS=$(( $ATTEMPTS +1 ))
+
+  # create proxy entry
+  curl -k -u admin:$(cat /opt/splunk/admin) https://localhost:8089/serviceNS/nobody/Splunk_TA_aws/storage/passwords -d name=default -d password={{ proxy_user }}:{{ proxy_pass }}@{{ proxy_url }}:{{ proxy_port }} -d realm=_aws_proxy
+
+  # enable proxy
+  curl -k -u admin:$(cat /opt/splunk/admin) https://localhost:8089/serviceNS/nobody/Splunk_TA_aws/splunk_ta_aws_settings/aws_proxy -d "proxy_enabled=1&username={{ proxy_user }}:{{ proxy_pass }}@{{ proxy_url }}:{{ proxy_port }}&host={{ proxy_url }}&port={{ proxy_port }}"
+
+  # wait for next attempt
+  sleep 4
+done

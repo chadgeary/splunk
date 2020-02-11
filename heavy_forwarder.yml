@@ -1,0 +1,233 @@
+---
+- name: splunk
+  hosts: localhost
+  connection: local
+  become: True
+  become_user: root
+  gather_facts: False
+  tasks:
+
+    - name: Installation RPM from S3
+      aws_s3:
+        mode: get
+        bucket: "{{ installation_bucket }}"
+        object: "{{ splunk_rpm_path }}"
+        dest: /tmp/splunk.rpm
+
+    - name: Splunk Installation
+      yum:
+        state: present
+        name: /tmp/splunk.rpm
+
+    - name: Remove Installation RPM
+      file:
+        path: /tmp/splunk.rpm
+        state: absent
+
+    - name: Set update boolean when not set
+      set_fact:
+        addon_update: False
+      when: addon_update is not defined
+
+    - name: Splunk_TA_AWS Addon from S3
+      aws_s3:
+        mode: get
+        bucket: "{{ installation_bucket }}"
+        object: "{{ splunk_aws_addon_path }}"
+        dest: /tmp/aws.tgz
+      when: addon_update|bool = True
+
+    - name: Unarchive Addon
+      unarchive:
+        src: /tmp/aws.tgz
+        dest: /opt/splunk/etc/apps/
+        owner: splunk
+        group: splunk
+      when: addon_update|bool = True
+
+    - name: Splunk Index Directory
+      file:
+        path: "/opt/splunk/var/lib/splunk/modinputs/aws_s3/{{ input_bucket }}"
+        state: directory
+        owner: splunk
+        group: splunk
+        mode: '0700'
+
+    - name: Splunk Addon Local Directory
+      file:
+        path: /opt/splunk/etc/apps/Splunk_TA_aws/local
+        state: directory
+        owner: splunk
+        group: splunk
+        mode: '0700'
+
+    - name: outputs.conf
+      template:
+        src: conf/heavy_forwarder/outputs.conf
+        dest: /opt/splunk/etc/system/local/outputs.conf
+        owner: splunk
+        group: splunk
+        mode: '0700'
+
+    - name: inputs.conf
+      copy:
+        src: conf/heavy_forwarder/inputs.conf={{ heavy_forwarder }}
+        owner: splunk
+        group: splunk
+        mode: '0700'
+
+    - name: Determine admin file state
+      stat:
+        path: /opt/splunk/admin
+      register: splunk_admin
+
+    - name: Generate admin file if not exists
+      shell: |
+        openssl rand -base64 32 > /opt/splunk/admin
+      become: yes
+      become_user: splunk
+      become_method: su
+      become_flags: '-s /bin/bash'
+      when: splunk_admin.stat.exists|bool == False
+
+    - name: Set admin file permissions
+      file:
+        path: /opt/splunk/admin
+        mode: '0400'
+
+    - name: Splunk Systemd State
+      shell: |
+        systemctl is-active splunkd
+      register: systemd_status
+      ignore_errors: True
+
+    - name: Register Admin Credential
+      shell: |
+        cat /opt/splunk/admin
+      register: admin_password
+      no_log: True
+
+    - name: user-seed.conf State
+      stat:
+        path: /opt/splunk/etc/system/local/user-seed.conf
+      register: user_seed
+
+    - name: user-seed.conf Template
+      template:
+        src: conf/user-seed.conf
+        dest: /opt/splunk/etc/system/local/user-seed.conf
+        owner: splunk
+        group: splunk
+        mode: '0600'
+      when: user_seed.stat.exists|bool == False
+
+    - name: Splunk EULA Acceptance Start
+      shell: |
+        /opt/splunk/bin/splunk start --accept-license &
+      become: yes
+      become_user: splunk
+      become_method: su
+      become_flags: '-s /bin/bash'
+      ignore_errors: True
+      when: systemd_status.rc != 0
+
+    - name: Splunk EULA Acceptance Wait
+      wait_for:
+        host: localhost
+        port: 8089
+        timeout: 60
+        delay: 10
+      when: systemd_status.rc != 0
+
+    - name: Splunk EULA Acceptance Stop
+      shell: |
+        /opt/splunk/bin/splunk stop
+      become: yes
+      become_user: splunk
+      become_method: su
+      become_flags: '-s /bin/bash'
+      ignore_errors: True
+      when: systemd_status.rc != 0
+
+    - name: Splunk user ownership
+      file:
+        path: /opt/splunk
+        state: directory
+        owner: splunk
+        group: splunk
+        recurse: yes
+      ignore_errors: True
+
+    - name: Splunk SystemD Unit
+      copy:
+        src: system/splunkd.service
+        dest: /etc/systemd/system/splunkd.service
+        owner: root
+        group: root
+        mode: '0400'
+
+    - name: Splunk SystemD Started/Enable
+      systemd:
+        name: splunkd
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Set addon_proxy = False when not defined
+      set_fact:
+        addon_proxy: False
+      when: addon_proxy is not defined
+
+    - name: Check AWS Addon Proxy Hash
+      shell: |
+        grep --quiet _aws_proxy /opt/splunk/etc/apps/Splunk_TA_aws/local/passwords.conf
+      ignore_errors: True
+      register: addon_hash
+      when: addon_proxy|bool = True
+
+    - name: Set addon_hash = 0 when not defined
+      set_fact:
+        addon_hash: 0
+      when: addon_hash is not defined
+
+    - name: AWS Addon Proxy Credentials Wait
+      wait_for:
+        host: localhost
+        port: 8089
+        timeout: 30
+        delay: 5
+      when: addon_proxy|bool = True or addon_hash != 0
+
+    - name: AWS Addon Proxy Script
+      template:
+        src: etc/splunk_ta_aws_addon_proxy
+        dest: /usr/local/bin/splunk_ta_aws_addon_proxy
+        owner: splunk
+        group: splunk
+        mode: '0500'
+      when: addon_proxy|bool = True or addon_hash != 0
+
+    - name: AWS Addon Proxy Credentials Set
+      shell: |
+        /usr/local/bin/splunk_ta_aws_addon_proxy &
+      become: yes
+      become_method: su
+      become_flags: '-s /bin/bash'
+      ignore_errors: True
+      no_log: True
+      when: addon_proxy|bool = True or addon_hash != 0
+
+    - name: server.conf
+      template:
+        src: conf/heavy_forwarder/server.conf
+        dest: /opt/splunk/etc/system/local/server.conf
+        owner: splunk
+        group: splunk
+        mode: '0400'
+      register: server_conf
+
+    - name: Server Reload on Change
+      system:
+        name: splunkd
+        state: restarted
+      when: server_conf.changed

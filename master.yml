@@ -1,0 +1,270 @@
+---
+- name: splunk
+  hosts: localhost
+  connection: local
+  become: True
+  become_user: root
+  gather_facts: False
+  tasks:
+
+    - name: Installation RPM from S3
+      aws_s3:
+        mode: get
+        bucket: "{{ installation_bucket }}"
+        object: "{{ splunk_rpm_path }}"
+        dest: /tmp/splunk.rpm
+
+    - name: Splunk Installation
+      yum:
+        state: present
+        name: /tmp/splunk.rpm
+
+    - name: Remove Installation RPM
+      file:
+        path: /tmp/splunk.rpm
+        state: absent
+
+    - name: Web/Cluster Directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: splunk
+        group: splunk
+        mode: '0700'
+      with_items:
+        - /opt/splunk/etc/auth
+        - /opt/splunk/etc/master-apps
+        - /opt/splunk/etc/master-apps/_cluster
+        - /opt/splunk/etc/master-apps/_cluster/local
+
+    - name: Cluster Props Indexes and Inputs
+      template:
+        src: "conf/master/{{ item }}"
+        dest: "/opt/splunk/etc/master-apps/_cluster/local/{{ item }}"
+        owner: splunk
+        group: splunk
+        mode: '0400'
+      with_items:
+        - indexes.conf
+        - inputs.conf
+      register: cluster_conf
+
+    - name: Port 8089 (Cluster), 8000 (Web) and 443 (Forward to Web)
+      iptables:
+        chain: INPUT
+        ctstate: NEW
+        jump: ACCEPT
+        protocol: tcp
+        syn: match
+        destionation_port: "{{ item }}"
+        comment: Splunk Services
+      with_items:
+        - '8089'
+        - '8000'
+        - '443'
+
+    - name: Port 443 forward to 8000
+      iptables:
+        table: nat
+        chain: PREROUTING
+        protocol: tcp
+        match: tcp
+        destination_port: '443'
+        jump: REDIRECT
+        to_ports: '8000'
+        comment: Redirect 443 to 8000 Splunk Web
+
+    - name: Persistent iptables (EL7)
+      shell: |
+        service iptables save
+      args:
+        warn: no
+
+    - name: Determine admin file state
+      stat:
+        path: /opt/splunk/admin
+      register: splunk_admin
+
+    - name: Generate admin file if not exists
+      shell: |
+        openssl rand -base64 32 > /opt/splunk/admin
+      when: splunk_admin.stat.exists|bool == False
+
+    - name: Set admin file ownership
+      file:
+        path: /opt/splunk/admin
+        owner: splunk
+        group: splunk
+        mode: '0400'
+
+    - name: Private Key and Web Certificate (Local) to Splunk
+      copy:
+        src: "{{ item }}"
+        dest: "/opt/splunk/etc/auth/{{ item }}"
+        remote_src: yes
+        owner: splunk
+        group: splunk
+        mode: '0400'
+      with_items:
+        - {{ web_key }}
+        - {{ web_certificate }}
+
+    - name: Splunk Systemd State
+      shell: |
+        systemctl is-active splunkd
+      register: systemd_status
+      ignore_errors: True
+
+    - name: Register Admin Password
+      shell: |
+        cat /opt/splunk/admin
+      register: admin_password
+      no_log: True
+
+    - name: user-seed.conf State
+      stat:
+        path: /opt/splunk/etc/system/local/user-seed.conf
+      register: user_seed
+
+    - name: user-seed.conf Template
+      template:
+        src: conf/user-seed.conf
+        dest: /opt/splunk/etc/system/local/user-seed.conf
+        owner: splunk
+        group: splunk
+        mode: '0600'
+      when: user_seed.stat.exists|bool == False
+
+    - name: Splunk EULA Acceptance Start
+      shell: |
+        /opt/splunk/bin/splunk start --accept-license &
+      become: yes
+      become_user: splunk
+      become_method: su
+      become_flags: '-s /bin/bash'
+      ignore_errors: True
+      when: systemd_status.rc != 0
+
+    - name: Splunk EULA Acceptance Wait
+      wait_for:
+        host: localhost
+        port: 8000
+        timeout: 60
+        delay: 10
+      when: systemd_status.rc != 0
+
+    - name: Splunk EULA Acceptance Stop
+      shell: |
+        /opt/splunk/bin/splunk stop
+      become: yes
+      become_user: splunk
+      become_method: su
+      become_flags: '-s /bin/bash'
+      ignore_errors: True
+      when: systemd_status.rc != 0
+
+    - name: Splunk user ownership
+      file:
+        path: /opt/splunk
+        state: directory
+        owner: splunk
+        group: splunk
+        recurse: yes
+      ignore_errors: True
+
+    - name: Splunk SystemD Unit
+      copy:
+        src: system/splunkd.service
+        dest: /etc/systemd/system/splunkd.service
+        owner: root
+        group: root
+        mode: '0400'
+
+    - name: Splunk SystemD Started/Enable
+      systemd:
+        name: splunkd
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: License File
+      copy:
+        src: conf/master/splunk.license
+        dest: /opt/splunk/splunk.license
+        owner: splunk
+        group: splunk
+        mode: '0400'
+
+    - name: License Registration
+      shell: |
+        /opt/splunk/bin/splunk add licenses /opt/splunk/splunk.license -auth "administrator:$(cat /opt/splunk/admin)"
+      become: yes
+      become_user: splunk
+      become_method: su
+      become_flags: '-s /bin/bash'
+      ignore_errors: True
+
+    - name: Set ldap_auth = False when not set
+      set_fact:
+        ldap_auth: False
+      when: ldap_auth is not defined
+
+    - name: Authentication and LDAP conf
+      template:
+        src: "conf/master/{{ item }}"
+        dest: "/opt/splunk/etc/system/local/{{ item }}"
+        owner: splunk
+        group: splunk
+        mode: '0400'
+      register: auth_conf
+      with_items:
+        - authentication.conf
+        - ldap.conf
+      when: ldap_auth|bool == True
+
+    - name: Set auth_conf = False when not set
+      set_fact:
+        auth_conf: False
+      when: auth_conf is not defined
+
+    - name: Authentication Reload on Change
+      shell: |
+        /opt/splunk/bin/splunk _internal call /authentication/providers/services/_reload -auth admin:$(cat /opt/splunk/admin)
+      become: yes
+      become_user: splunk
+      become_method: su
+      become_flags: '-s /bin/bash'
+      ignore_errors: True
+      no_log: True
+      when: auth_conf is defined and auth_conf.changed
+
+    - name: server.conf
+      template:
+        src: conf/master/server.conf
+        dest: /opt/splunk/etc/system/local/server.conf
+        owner: splunk
+        group: splunk
+        mode: '0400'
+      register: server_conf
+
+    - name: Server Reload on Change
+      system:
+        name: splunkd
+        state: restarted
+      when: server_conf.changed
+
+    - name: Wait for API Port
+      wait_for:
+        host: localhost
+        port: 8089
+        timeout: 30
+        delay: 5
+
+    - name: Push Index Cluster Bundle
+      shell: |
+        /opt/splunk/bin/splunk apply cluster-bundle --answer-yes
+      become: yes
+      become_user: splunk
+      become_method: su
+      become_flags: '-s /bin/bash'
+      ignore_errors: True
