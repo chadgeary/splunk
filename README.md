@@ -3,6 +3,11 @@ Splunk Enterprise system stack with S3 input/output. Designed for RHEL / CentOS 
 
 # Variables
 ```
+# installation sources (s3)
+installation_bucket, e.g.: mypackages
+splunk_rpm_path, e.g.: splunk/splunk.rpm
+splunk_aws_addon_path, e.g.: splunk/awsaddon.tgz
+ 
 # required for some plays
 web_key, e.g.: /etc/pki/tls/private/splunk.key
 web_certificate, e.g.: /etc/pki/tls/private/splunk.pem
@@ -42,25 +47,25 @@ admin_users, e.g: chad;user2
 master
 ```
 # locally without ldap
-ansible-playbook master.yml --extra-vars "target=localhost master_address=splunk.chadg.net splunk_secret=somefancystring aws_region=us_east_2 input_bucket=chads_bucket input_directory=chads_dir ldap_auth=False output_bucket=splunksbucket web_key=/etc/pki/tls/private/splunk.key web_certificate=/etc/pki/tls/private/splunk.pem"
+ansible-playbook master.yml --extra-vars "target=localhost installation_bucket=mybucket splunk_rpm_path=splunk/splunk.rpm master_address=splunk.chadg.net splunk_secret=somefancystring aws_region=us_east_2 input_bucket=chads_bucket input_directory=chads_dir ldap_auth=False output_bucket=splunksbucket web_key=/etc/pki/tls/private/splunk.key web_certificate=/etc/pki/tls/private/splunk.pem"
 ```
 web
 ```
 # locally with ldap
-ansible-playbook master.yml --extra-vars "target=localhost master_address=splunk.chadg.net splunk_secret=somefancystring aws_region=us_east_2 ldap_auth=True ldap_host=ldap.chadg.net bind_dn=uid=chadbind,cn=users,cn=accounts,dc=chadg,dc=net bind_dn_password=bindssecret user_base_dn=cn=users,dc=chadg,dc=net admin_users=chad web_key=/etc/pki/tls/private/splunk.key web_certificate=/etc/pki/tls/private/splunk.pem"
+ansible-playbook master.yml --extra-vars "target=localhost installation_bucket=mybucket splunk_rpm_path=splunk/splunk.rpm master_address=splunk.chadg.net splunk_secret=somefancystring aws_region=us_east_2 ldap_auth=True ldap_host=ldap.chadg.net bind_dn=uid=chadbind,cn=users,cn=accounts,dc=chadg,dc=net bind_dn_password=bindssecret user_base_dn=cn=users,dc=chadg,dc=net admin_users=chad web_key=/etc/pki/tls/private/splunk.key web_certificate=/etc/pki/tls/private/splunk.pem"
 ```
 indexer(s)
 ```
 # locally
-ansible-playbook indexer.yml --extra-vars "target=localhost master_address=splunk.chadg.net splunk_secret=somefancystring aws_region=us_east_2"
+ansible-playbook indexer.yml --extra-vars "target=localhost installation_bucket=mybucket splunk_rpm_path=splunk/splunk.rpm master_address=splunk.chadg.net splunk_secret=somefancystring aws_region=us_east_2"
 ```
 heavy_forwarder(s)
 Scale large bucket ingestion with additional forwarders, e.g.:
 ```
 # locally, first heavy forwarder ingests s3://chadsbucket1/data1
-ansible-playbook indexer.yml --extra-vars "target=localhost master_address=splunk.chadg.net splunk_secret=somefancystring aws_region=us_east_2 instance_profile=chad_splunk input_bucket=chadsbucket1 input_directory=data1 addon_proxy=True proxy_user=chadsproxy proxy_pass=chadssecret proxy_url=proxy.chadg.net proxy_port=499"
+ansible-playbook indexer.yml --extra-vars "target=localhost installation_bucket=mybucket splunk_rpm_path=splunk/splunk.rpm splunk_aws_addon_path=splunk/awsaddon.tgz master_address=splunk.chadg.net splunk_secret=somefancystring aws_region=us_east_2 instance_profile=chad_splunk input_bucket=chadsbucket1 input_directory=data1 addon_proxy=True proxy_user=chadsproxy proxy_pass=chadssecret proxy_url=proxy.chadg.net proxy_port=499"
 # locally, second heavy forwader ingests s3://chadsbucket2/data2
-ansible-playbook indexer.yml --extra-vars "target=localhost master_address=splunk.chadg.net splunk_secret=somefancystring aws_region=us_east_2 instance_profile=chad_splunk input_bucket=chadsbucket2 input_directory=data2 addon_proxy=True proxy_user=chadsproxy proxy_pass=chadssecret proxy_url=proxy.chadg.net proxy_port=499"
+ansible-playbook indexer.yml --extra-vars "target=localhost installation_bucket=mybucket splunk_rpm_path=splunk/splunk.rpm splunk_aws_addon_path=splunk/awsaddon.tgz master_address=splunk.chadg.net splunk_secret=somefancystring aws_region=us_east_2 instance_profile=chad_splunk input_bucket=chadsbucket2 input_directory=data2 addon_proxy=True proxy_user=chadsproxy proxy_pass=chadssecret proxy_url=proxy.chadg.net proxy_port=499"
 ```
 
 # Todo
